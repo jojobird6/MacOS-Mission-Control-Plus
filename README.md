@@ -23,8 +23,8 @@ Close windows straight from macOS Mission Control. Hover over a window thumbnail
 
 ## Install
 ```sh
-git clone https://github.com/jojobird6/MCClose.git
-cd MCClose
+git clone https://github.com/jojobird6/MacOS-Mission-Control-Plus.git
+cd MacOS-Mission-Control-Plus
 ./scripts/install.sh
 ```
 The script builds the app, installs it to `/Applications`, and adds a LaunchAgent. The LaunchAgent starts MCClose at login and restarts it if it crashes.
