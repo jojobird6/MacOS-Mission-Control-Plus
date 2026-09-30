@@ -49,4 +49,4 @@ When prompted, allow MCClose under **System Settings → Privacy & Security → 
 Mission Control has no public API, so a future macOS update may break this.
 
 ## License
-MIT
+GNU General Public License v3.0. See [LICENSE](LICENSE).
