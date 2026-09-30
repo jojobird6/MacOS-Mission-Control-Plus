@@ -1,35 +1,49 @@
 # MCClose
 
-Close, minimize, hide, or quit windows directly from Mission Control, like Mission Control Plus.
+Close windows straight from macOS Mission Control. Hover over a window thumbnail and click the ✕ button. A free, open-source take on [Mission Control Plus](https://www.fadel.io/missioncontrolplus).
 
-## Usage
-Open Mission Control and hover over a window. A ✕ button appears on its top-left corner; click it to close the window.
+## Features
+- **✕ button** on the hovered thumbnail closes that window.
+- **Keyboard shortcuts** act on the hovered window. They work only inside Mission Control and don't change how these keys behave anywhere else:
 
-Keyboard shortcuts act on the hovered window and work only while Mission Control is open:
+  | Keys | Action |
+  |---|---|
+  | ⌘W | Close window |
+  | ⌥⌘W | Close all windows of the app |
+  | ⌘M / ⌥⌘M | Minimize window / all app windows |
+  | ⌘H / ⌥⌘H | Hide app / hide other apps |
+  | ⌘Q | Quit app |
+  | ↩ | Open window |
 
-| Keys | Action |
-|---|---|
-| ⌘W / ⌥⌘W | Close window / all windows of that app |
-| ⌘M / ⌥⌘M | Minimize window / all windows of that app |
-| ⌘H / ⌥⌘H | Hide app / hide other apps |
-| ⌘Q | Quit app |
-| ↩ | Open window |
+- **Menu-bar icon** to turn it on or off and quit. It has no Dock icon.
 
-The menu-bar icon (✕ in a rectangle) lets you disable the app or quit it.
+## Requirements
+- macOS 13 or later (tested on macOS 27)
+- Xcode or the Swift command-line tools
 
 ## Install
 ```sh
-./scripts/install.sh      # build, sign, copy to /Applications, start at login
+git clone https://github.com/jojobird6/MCClose.git
+cd MCClose
+./scripts/install.sh
+```
+The script builds the app, installs it to `/Applications`, and adds a LaunchAgent. The LaunchAgent starts MCClose at login and restarts it if it crashes.
+
+When prompted, allow MCClose under **System Settings → Privacy & Security → Accessibility**.
+
+> **Tip:** If you have an Apple Development or Developer ID certificate, the script signs the app with it, so the Accessibility permission carries over when you reinstall. Otherwise the app is ad-hoc signed, and you may need to allow it again after each reinstall. To choose a specific certificate, set `SIGN_IDENTITY`.
+
+## Uninstall
+```sh
 ./scripts/uninstall.sh
 ```
-The first time it runs, grant it permission under **System Settings → Privacy & Security → Accessibility**. The app is signed with your Apple Development certificate, so the permission carries over when you rebuild and reinstall.
-
-A LaunchAgent (`~/Library/LaunchAgents/com.joseph.mcclose.plist`) starts it at login and restarts it if it crashes. Choosing **Quit MCClose** from the menu keeps it stopped until the next login.
 
 ## How it works
-- **Detecting Mission Control:** the Dock exposes an accessibility group with identifier `mc` only while Mission Control is open.
-- **Finding thumbnails:** on macOS 27, while Mission Control is open, `CGWindowListCopyWindowInfo` reports each window's *thumbnail* rect as its bounds. The Dock's accessibility tree no longer lists the thumbnails. Layer-0 windows from WindowManager, which draws the hover highlight, are ignored.
-- **Actions:** the app matches each thumbnail to the app's AX window using `_AXUIElementGetWindow`, then presses that window's close button.
-- **Shortcuts:** a `CGEventTap` handles them and swallows the keys only while Mission Control is open.
+- **Detecting Mission Control:** the Dock creates an accessibility element (`AXGroup` with identifier `mc`) only while Mission Control is open.
+- **Placing the ✕:** while Mission Control is open, macOS reports each window's thumbnail rectangle as its bounds (`CGWindowListCopyWindowInfo`), so the ✕ is drawn over that rectangle.
+- **Taking actions:** close, minimize, and the other actions go through the Accessibility API. Shortcuts use a `CGEventTap` that is active only while Mission Control is open.
 
-Set `MCCLOSE_DEBUG=1` when running the binary to log clicks and close attempts.
+Mission Control has no public API, so a future macOS update may break this.
+
+## License
+MIT
