@@ -33,45 +33,56 @@ private final class CloseButtonView: NSView {
 }
 
 /// Floating ✕ button that tracks the hovered Mission Control thumbnail.
+///
+/// While Mission Control is open, the system animates any window that moves, so a single panel
+/// would glide between thumbnails. Instead, a fresh panel is created at each new position.
 final class Overlay {
     static let size: CGFloat = 26
     var onClose: ((ScreenWindow) -> Void)?
     private(set) var target: ScreenWindow?
-    private let panel: NSPanel
+    private var panel: NSPanel?
 
-    init() {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: Self.size, height: Self.size),
-                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    private func makePanel(at origin: NSPoint) -> NSPanel {
+        let panel = NSPanel(contentRect: NSRect(origin: origin, size: NSSize(width: Self.size, height: Self.size)),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)))
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        let view = CloseButtonView(frame: panel.contentLayoutRect)
+        let view = CloseButtonView(frame: NSRect(x: 0, y: 0, width: Self.size, height: Self.size))
         view.onClick = { [weak self] in
             guard let self, let target = self.target else { return }
             self.hide()
             self.onClose?(target)
         }
         panel.contentView = view
+        return panel
     }
 
     func show(for window: ScreenWindow) {
         target = window
         // Straddle the thumbnail's top-left corner, like a native close button.
         let origin = NSPoint(x: window.frame.minX - Self.size / 2 + 4, y: window.frame.maxY - Self.size / 2 - 4)
-        if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
-        if !panel.isVisible { panel.orderFrontRegardless() }
+        if let panel, panel.frame.origin == origin { return }
+        let old = panel
+        let new = makePanel(at: origin)
+        new.orderFrontRegardless()
+        old?.orderOut(nil)
+        panel = new
     }
 
     func hide() {
         target = nil
-        if panel.isVisible { panel.orderOut(nil) }
+        panel?.orderOut(nil)
+        panel = nil
     }
 
     /// True if the point is over the ✕, so hovering it keeps its thumbnail targeted.
     func contains(_ point: NSPoint) -> Bool {
-        panel.isVisible && panel.frame.contains(point)
+        panel?.frame.contains(point) ?? false
     }
 }
