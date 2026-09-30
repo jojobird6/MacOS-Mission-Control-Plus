@@ -59,13 +59,43 @@ enum Actions {
     }
 
     static func quit(pid: pid_t) {
-        NSRunningApplication(processIdentifier: pid)?.terminate()
+        let app = NSRunningApplication(processIdentifier: pid)
+        // terminate() fails when LaunchServices has lost track of the app's pid (it reports -1).
+        let ok = (app.map { $0.processIdentifier > 0 && $0.terminate() } ?? false) || pressQuitMenuItem(pid: pid)
+        debugLog("quit pid=\(pid) found=\(app != nil) ok=\(ok)")
+    }
+
+    /// Presses the app's ⌘Q menu item, so it quits exactly as if the user chose Quit.
+    static func pressQuitMenuItem(pid: pid_t) -> Bool {
+        func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
+            var v: AnyObject?
+            return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+        }
+        guard let menuBar = attr(AXUIElementCreateApplication(pid), kAXMenuBarAttribute),
+              let appMenu = (attr(menuBar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement])?.dropFirst().first,
+              let menu = (attr(appMenu, kAXChildrenAttribute) as? [AXUIElement])?.first,
+              let items = attr(menu, kAXChildrenAttribute) as? [AXUIElement],
+              let quit = items.last(where: {
+                  (attr($0, kAXMenuItemCmdCharAttribute) as? String)?.uppercased() == "Q"
+                      && (attr($0, kAXMenuItemCmdModifiersAttribute) as? Int ?? 0) == 0
+              })
+        else { return false }
+        return AXUIElementPerformAction(quit, kAXPressAction as CFString) == .success
     }
 
     /// Opens the window the same way a user click in Mission Control would.
     static func open(_ window: ScreenWindow) {
+        click(window.frame)
+    }
+
+    /// Activates the app by clicking its Dock icon, which also leaves Mission Control.
+    static func activate(_ app: DockApp) {
+        click(app.frame)
+    }
+
+    private static func click(_ frame: NSRect) {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-        let p = CGPoint(x: window.frame.midX, y: primaryHeight - window.frame.midY)
+        let p = CGPoint(x: frame.midX, y: primaryHeight - frame.midY)
         let original = CGEvent(source: nil)?.location
         CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)

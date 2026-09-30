@@ -32,15 +32,20 @@ private final class CloseButtonView: NSView {
     }
 }
 
-/// Floating ✕ button that tracks the hovered Mission Control thumbnail.
+/// Floating ✕ button that tracks the hovered Mission Control thumbnail or Dock icon.
 ///
 /// While Mission Control is open, the system animates any window that moves, so a single panel
-/// would glide between thumbnails. Instead, a fresh panel is created at each new position.
+/// would glide between thumbnails. Instead, a fresh panel is created at each new position, and the ✕ is hidden while
+/// its target is still moving (e.g. Mission Control re-laying out, or the Dock sliding after an app quits).
 final class Overlay {
     static let size: CGFloat = 26
-    var onClose: ((ScreenWindow) -> Void)?
-    private(set) var target: ScreenWindow?
+    var onClose: ((HoverTarget) -> Void)?
+    private(set) var target: HoverTarget?
     private var panel: NSPanel?
+    /// The target's frame on the previous tick and how many ticks in a row it hasn't changed.
+    private var lastFrame: NSRect?
+    private var stableTicks = 0
+    private static let ticksToSettle = 2
 
     private func makePanel(at origin: NSPoint) -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(origin: origin, size: NSSize(width: Self.size, height: Self.size)),
@@ -63,11 +68,23 @@ final class Overlay {
         return panel
     }
 
-    func show(for window: ScreenWindow) {
-        target = window
-        // Straddle the thumbnail's top-left corner, like a native close button.
-        let origin = NSPoint(x: window.frame.minX - Self.size / 2 + 4, y: window.frame.maxY - Self.size / 2 - 4)
+    func show(for target: HoverTarget) {
+        self.target = target
+        let frame = target.frame
+        stableTicks = frame == lastFrame ? stableTicks + 1 : 0
+        lastFrame = frame
+        guard stableTicks >= Self.ticksToSettle else {
+            removePanel()
+            return
+        }
+        // Straddle the top-left corner, like a native close button. Dock items include padding around the icon.
+        let inset: CGFloat
+        if case .dockApp = target { inset = 10 } else { inset = 4 }
+        // Rounded because the window server snaps panel frames to whole points; otherwise the comparison below never
+        // matches and a new panel is created every tick.
+        let origin = NSPoint(x: (frame.minX - Self.size / 2 + inset).rounded(), y: (frame.maxY - Self.size / 2 - inset).rounded())
         if let panel, panel.frame.origin == origin { return }
+        debugLog("overlay new panel at \(origin) for \(target)")
         let old = panel
         let new = makePanel(at: origin)
         new.orderFrontRegardless()
@@ -77,11 +94,18 @@ final class Overlay {
 
     func hide() {
         target = nil
+        lastFrame = nil
+        stableTicks = 0
+        removePanel()
+    }
+
+    private func removePanel() {
+        if panel != nil { debugLog("overlay hide") }
         panel?.orderOut(nil)
         panel = nil
     }
 
-    /// True if the point is over the ✕, so hovering it keeps its thumbnail targeted.
+    /// True if the point is over the ✕, so hovering it keeps its target.
     func contains(_ point: NSPoint) -> Bool {
         panel?.frame.contains(point) ?? false
     }

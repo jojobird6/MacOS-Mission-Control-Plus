@@ -1,9 +1,10 @@
 # MCClose
 
-Close windows straight from macOS Mission Control. Hover over a window thumbnail and click the ✕ button. A free, open-source take on [Mission Control Plus](https://www.fadel.io/missioncontrolplus).
+Close windows straight from macOS Mission Control. Hover over a window thumbnail and click the ✕ button, or hover a running app's Dock icon and click ✕ to quit it. A free, open-source take on [Mission Control Plus](https://www.fadel.io/missioncontrolplus).
 
 ## Features
 - **✕ button** on the hovered thumbnail closes that window.
+- **✕ on Dock icons:** in Mission Control, hovering a running app's Dock icon shows a ✕ that quits the app. Finder is excluded.
 - **Keyboard shortcuts** act on the hovered window. They work only inside Mission Control and don't change how these keys behave anywhere else:
 
   | Keys | Action |
@@ -14,6 +15,8 @@ Close windows straight from macOS Mission Control. Hover over a window thumbnail
   | ⌘H / ⌥⌘H | Hide app / hide other apps |
   | ⌘Q | Quit app |
   | ↩ | Open window |
+
+  The shortcuts also work when a Dock icon is hovered. There, they act on the whole app: ⌘W and ⌘M close or minimize all of its windows, and ↩ switches to the app.
 
 - **Menu-bar icon** to turn it on or off and quit. It has no Dock icon.
 
@@ -40,7 +43,7 @@ When prompted, allow MCClose under **System Settings → Privacy & Security → 
 
 ## How it works
 - **Detecting Mission Control:** the Dock creates an accessibility element (`AXGroup` with identifier `mc`) only while Mission Control is open.
-- **Placing the ✕:** while Mission Control is open, macOS reports each window's thumbnail rectangle as its bounds (`CGWindowListCopyWindowInfo`), so the ✕ is drawn over that rectangle.
+- **Placing the ✕:** while Mission Control is open, macOS reports each window's thumbnail rectangle as its bounds (`CGWindowListCopyWindowInfo`), so the ✕ is drawn over that rectangle. Dock icon positions come from the Dock's accessibility items (`AXApplicationDockItem`).
 - **Taking actions:** close, minimize, and the other actions go through the Accessibility API. Shortcuts use a `CGEventTap` that is active only while Mission Control is open.
 
 Mission Control has no public API, so a future macOS update may break this.

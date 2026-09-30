@@ -7,8 +7,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var trackTimer: Timer?
     private var windows: [ScreenWindow] = []
+    private var dockApps: [DockApp] = []
+    private var dockScannedAt = Date.distantPast
     /// Windows we've asked to close; ignored until Mission Control re-lays out.
     private var closing: Set<CGWindowID> = []
+    /// Apps we've asked to quit; their Dock icons are ignored for the rest of this Mission Control session.
+    private var quitting: Set<pid_t> = []
     private var hotkeysStarted = false
 
     private var enabled: Bool {
@@ -18,7 +22,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
-        overlay.onClose = { [weak self] window in self?.perform(.close, on: window) }
+        overlay.onClose = { [weak self] target in
+            switch target {
+            case .window(let window): self?.perform(.close, on: window)
+            case .dockApp(let app): self?.perform(.quit, on: app)
+            }
+        }
         hotkeys.isActive = { [weak self] in self?.isTracking ?? false }
         hotkeys.handler = { [weak self] command in self?.handleHotkey(command) ?? false }
         monitor.onChange = { [weak self] active in self?.missionControlChanged(active) }
@@ -53,6 +62,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func missionControlChanged(_ active: Bool) {
         if active && enabled {
             closing.removeAll()
+            quitting.removeAll()
+            dockScannedAt = .distantPast
             trackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.track() }
             RunLoop.main.add(trackTimer!, forMode: .common)
             track()
@@ -61,33 +72,60 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             trackTimer = nil
             overlay.hide()
             windows = []
+            dockApps = []
         }
     }
 
     private func track() {
         windows = WindowScanner.visibleWindows().filter { !closing.contains($0.id) }
         let mouse = NSEvent.mouseLocation
-        let current = overlay.target.flatMap { t in windows.first { $0.id == t.id } }
-        if let current, overlay.contains(mouse) {
+        scanDockIfNeeded(mouse: mouse)
+        if let current = refreshed(overlay.target), overlay.contains(mouse) {
             overlay.show(for: current)
-        } else if let hovered = WindowScanner.window(at: mouse, in: windows) {
+        } else if let hovered = target(at: mouse) {
             overlay.show(for: hovered)
         } else {
             overlay.hide()
         }
     }
 
-    private var hoveredWindow: ScreenWindow? {
-        overlay.target ?? WindowScanner.window(at: NSEvent.mouseLocation, in: windows)
+    /// Dock icons rarely move, so rescan them slowly unless the pointer is near the Dock, where icons may slide or
+    /// magnify and the overlay needs every frame to tell when they've settled.
+    private func scanDockIfNeeded(mouse: NSPoint) {
+        let nearDock = dockApps.reduce(NSRect.null) { $0.union($1.frame) }.insetBy(dx: -40, dy: -40).contains(mouse)
+        let interval: TimeInterval = nearDock ? 0 : 0.5
+        guard Date().timeIntervalSince(dockScannedAt) >= interval else { return }
+        dockScannedAt = Date()
+        dockApps = DockScanner.runningApps().filter { !quitting.contains($0.pid) }
+    }
+
+    /// The target with its current frame, or nil if it's gone.
+    private func refreshed(_ target: HoverTarget?) -> HoverTarget? {
+        switch target {
+        case .window(let w): return windows.first { $0.id == w.id }.map(HoverTarget.window)
+        case .dockApp(let a): return dockApps.first { $0.pid == a.pid && $0.frame.intersects(a.frame) }.map(HoverTarget.dockApp)
+        case nil: return nil
+        }
+    }
+
+    /// Dock icons are checked first because the Dock draws above window thumbnails.
+    private func target(at point: NSPoint) -> HoverTarget? {
+        if let app = DockScanner.app(at: point, in: dockApps) { return .dockApp(app) }
+        return WindowScanner.window(at: point, in: windows).map(HoverTarget.window)
+    }
+
+    private var hoveredTarget: HoverTarget? {
+        overlay.target ?? target(at: NSEvent.mouseLocation)
     }
 
     // MARK: Actions
 
     private func handleHotkey(_ command: Hotkeys.Command) -> Bool {
-        guard let window = hoveredWindow else {
-            return false
+        switch hoveredTarget {
+        case .window(let window): DispatchQueue.main.async { self.perform(command, on: window) }
+        case .dockApp(let app): DispatchQueue.main.async { self.perform(command, on: app) }
+        case nil: return false
         }
-        DispatchQueue.main.async { self.perform(command, on: window) }
         return true
     }
 
@@ -113,6 +151,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .open:
             overlay.hide()
             Actions.open(window)
+        }
+        overlay.hide()
+        track()
+    }
+
+    /// Window-level commands act on all of the app's windows when a Dock icon is hovered.
+    private func perform(_ command: Hotkeys.Command, on app: DockApp) {
+        switch command {
+        case .close, .closeAll:
+            windows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
+            Actions.closeAllWindows(of: app.pid)
+        case .minimize, .minimizeAll:
+            Actions.minimizeAll(of: app.pid)
+        case .hide:
+            Actions.hide(pid: app.pid)
+        case .hideOthers:
+            Actions.hideOthers(except: app.pid)
+        case .quit:
+            debugLog("quit dock app \(app.name) pid=\(app.pid)")
+            quitting.insert(app.pid)
+            dockApps.removeAll { $0.pid == app.pid }
+            windows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
+            Actions.quit(pid: app.pid)
+        case .open:
+            overlay.hide()
+            Actions.activate(app)
         }
         overlay.hide()
         track()
@@ -153,7 +217,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        let title = NSMenuItem(title: "In Mission Control, hover a window and press:", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: "In Mission Control, hover a window or Dock icon and press:", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
         for (keys, desc) in Hotkeys.reference {
