@@ -46,6 +46,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "enabled") }
     }
 
+    /// When off, actions take effect immediately and Screen Recording is never needed or requested.
+    private var keepWindowsInPlace: Bool {
+        get { UserDefaults.standard.object(forKey: "keepWindowsInPlace") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "keepWindowsInPlace") }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
         overlay.onClose = { [weak self] target in
@@ -86,13 +92,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !hotkeysStarted { NSLog("MCClose: failed to create key event tap") }
         // Screen Recording is what lets a closed window look gone while the rest of Mission Control holds still.
         // Without it, actions take effect immediately.
-        if #available(macOS 14, *), !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        if #available(macOS 14, *), keepWindowsInPlace, !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
         monitor.start()
     }
 
     /// Whether actions can be held back, which needs a captured backdrop to hide their thumbnails.
     private var canDefer: Bool {
-        guard #available(macOS 14, *), CGPreflightScreenCaptureAccess() else { return false }
+        guard #available(macOS 14, *), keepWindowsInPlace, CGPreflightScreenCaptureAccess() else { return false }
         return !backgrounds.isEmpty || captureTask != nil
     }
 
@@ -126,7 +132,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func captureBackground() {
-        guard #available(macOS 14, *), CGPreflightScreenCaptureAccess() else { return }
+        guard #available(macOS 14, *), keepWindowsInPlace, CGPreflightScreenCaptureAccess() else { return }
         captureTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.captureDelay)
             guard !Task.isCancelled else { return }
@@ -379,7 +385,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isEnabled = false
             menu.addItem(item)
         }
-        if #available(macOS 14, *), !CGPreflightScreenCaptureAccess() {
+        if #available(macOS 14, *) {
+            let keep = NSMenuItem(title: "Keep Windows in Place While Closing", action: #selector(toggleKeepInPlace), keyEquivalent: "")
+            keep.target = self
+            keep.state = keepWindowsInPlace ? .on : .off
+            keep.toolTip = "Needs the Screen Recording permission. Turn off to act immediately without it."
+            menu.addItem(keep)
+        }
+        if #available(macOS 14, *), keepWindowsInPlace, !CGPreflightScreenCaptureAccess() {
             let item = NSMenuItem(title: "Allow Screen Recording to Keep Windows in Place…",
                                   action: #selector(openScreenRecording), keyEquivalent: "")
             item.target = self
@@ -404,6 +417,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleEnabled() {
         enabled.toggle()
         if !enabled { missionControlChanged(false) }
+    }
+
+    @objc private func toggleKeepInPlace() {
+        keepWindowsInPlace.toggle()
+        if keepWindowsInPlace {
+            if #available(macOS 14, *), !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        } else {
+            // Run whatever is held back now, as nothing will cover it any more.
+            commit(pending.commitAll())
+            captureTask?.cancel()
+            captureTask = nil
+            backgrounds = []
+            covers.removeAll()
+        }
     }
 
     @objc private func openScreenRecording() {

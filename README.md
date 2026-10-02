@@ -18,7 +18,7 @@ Close windows straight from macOS Mission Control. Hover over a window thumbnail
 
   The shortcuts also work when a Dock icon is hovered. There, they act on the whole app: ⌘W and ⌘M close or minimize all of its windows, and ↩ switches to the app.
 
-- **Windows stay in place while you close several.** Like Chrome's tabs, the rest of Mission Control doesn't jump around after each close. The closed window disappears right away, but the actual close (also quit, minimize and hide) waits until you pause for about 1.5 seconds, move the pointer away from the windows, or leave Mission Control. Hold ⌘ to keep everything in place for as long as you like; the windows rearrange once, when you release ⌘. This needs macOS 14 and the Screen Recording permission. Without them, actions take effect immediately.
+- **Windows stay in place while you close several.** Like Chrome's tabs, the rest of Mission Control doesn't jump around after each close. The closed window disappears right away, but the actual close (also quit, minimize and hide) waits until you pause for about 1.5 seconds, move the pointer away from the windows, or leave Mission Control. Hold ⌘ to keep everything in place for as long as you like; the windows rearrange once, when you release ⌘. This needs macOS 14 and the Screen Recording permission. Without them, or if you turn off **Keep Windows in Place While Closing** in the menu-bar menu, actions take effect immediately and Screen Recording isn't needed or requested.
 - **Menu-bar icon** to turn it on or off and quit. It has no Dock icon.
 
 ## Requirements
@@ -33,7 +33,7 @@ cd MacOS-Mission-Control-Plus
 ```
 The script builds the app, installs it to `/Applications`, and adds a LaunchAgent. The LaunchAgent starts MCClose at login and restarts it if it crashes.
 
-When prompted, allow MCClose under **System Settings → Privacy & Security → Accessibility**, and under **Screen & System Audio Recording** so windows can stay in place while you close several. The menu-bar icon has a shortcut to that setting.
+When prompted, allow MCClose under **System Settings → Privacy & Security → Accessibility**, and, optionally, under **Screen & System Audio Recording** so windows can stay in place while you close several (skip it by turning off *Keep Windows in Place While Closing*). The menu-bar icon has a shortcut to that setting.
 
 > **Tip:** If you have an Apple Development or Developer ID certificate, the script signs the app with it, so the Accessibility permission carries over when you reinstall. Otherwise the app is ad-hoc signed, and you may need to allow it again after each reinstall. To choose a specific certificate, set `SIGN_IDENTITY`.
 
