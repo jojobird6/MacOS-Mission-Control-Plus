@@ -4,6 +4,7 @@ import Cocoa
 struct DockApp: Equatable {
     let pid: pid_t
     let name: String
+    let url: URL
     /// Frame of the Dock item in Cocoa coordinates (origin bottom-left of primary screen).
     let frame: NSRect
 }
@@ -75,7 +76,7 @@ enum DockScanner {
             AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
             guard size.width > 0, size.height > 0 else { return nil }
             let frame = NSRect(x: pos.x, y: primaryHeight - pos.y - size.height, width: size.width, height: size.height)
-            return DockApp(pid: pid, name: attr(item, kAXTitleAttribute) as? String ?? "", frame: frame)
+            return DockApp(pid: pid, name: attr(item, kAXTitleAttribute) as? String ?? "", url: url, frame: frame)
         }
     }
 
@@ -89,6 +90,23 @@ enum DockScanner {
             result[key(URL(fileURLWithPath: String(cString: buffer)))] = pid
         }
         return result
+    }
+
+    /// Whether quitting the app takes its icon out of the Dock, so the icon should look gone while the quit is pending.
+    /// Kept-in-Dock apps and, with recent apps shown, any app stay put. A side or magnifying Dock is left alone because
+    /// the icon can't be painted over reliably there.
+    static func removesIconOnQuit(_ app: DockApp) -> Bool {
+        guard let prefs = UserDefaults(suiteName: "com.apple.dock") else { return false }
+        if prefs.object(forKey: "show-recents") as? Bool ?? true { return false }
+        if prefs.bool(forKey: "magnification") { return false }
+        if let orientation = prefs.string(forKey: "orientation"), orientation != "bottom" { return false }
+        let kept = (prefs.array(forKey: "persistent-apps") as? [[String: Any]] ?? []).compactMap { tile -> String? in
+            guard let file = (tile["tile-data"] as? [String: Any])?["file-data"] as? [String: Any],
+                  let string = file["_CFURLString"] as? String,
+                  let url = string.hasPrefix("/") ? URL(fileURLWithPath: string) : URL(string: string) else { return nil }
+            return key(url)
+        }
+        return !kept.contains(key(app.url))
     }
 
     static func app(at point: NSPoint, in apps: [DockApp]) -> DockApp? {

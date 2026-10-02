@@ -5,6 +5,8 @@ let package = Package(
     name: "MCClose",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "MCClose", path: "Sources/MCClose")
+        .target(name: "MCCloseCore", path: "Sources/MCCloseCore"),
+        .executableTarget(name: "MCClose", dependencies: ["MCCloseCore"], path: "Sources/MCClose"),
+        .testTarget(name: "MCCloseTests", dependencies: ["MCCloseCore"], path: "Tests/MCCloseTests"),
     ]
 )

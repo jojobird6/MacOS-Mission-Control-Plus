@@ -1,12 +1,28 @@
 import Cocoa
+import MCCloseCore
+
+/// An action whose effect is held back until Mission Control may rearrange, and what it hides meanwhile.
+private struct PendingCommand {
+    let command: Hotkeys.Command
+    let target: HoverTarget
+    let hiddenWindows: Set<CGWindowID>
+    let hidesDockIcon: Bool
+}
 
 final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let monitor = MissionControlMonitor()
     private let overlay = Overlay()
     private let hotkeys = Hotkeys()
+    private let covers = Covers()
     private var statusItem: NSStatusItem!
     private var trackTimer: Timer?
+    /// Every window thumbnail on screen, including covered ones.
+    private var allWindows: [ScreenWindow] = []
+    /// Thumbnails that can be hovered.
     private var windows: [ScreenWindow] = []
+    /// Every running app in the Dock, including covered ones.
+    private var allDockApps: [DockApp] = []
+    /// Dock icons that can be hovered.
     private var dockApps: [DockApp] = []
     private var dockScannedAt = Date.distantPast
     /// Windows we've asked to close; ignored until Mission Control re-lays out.
@@ -14,6 +30,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Apps we've asked to quit; their Dock icons are ignored for the rest of this Mission Control session.
     private var quitting: Set<pid_t> = []
     private var hotkeysStarted = false
+
+    private var pending = PendingQueue<PendingCommand>()
+    /// Mission Control's backdrop, used to paint over thumbnails whose action is pending.
+    private var backgrounds: [CapturedBackground] = []
+    private var captureTask: Task<Void, Never>?
+    /// Covers kept after their action ran, until the window or icon is gone, so it never flashes back into view.
+    private var committedCovers: [Covers.Key: Date] = [:]
+    private static let committedCoverTimeout: TimeInterval = 2
+    /// Lets Mission Control finish sliding in the Spaces bar and Dock before capturing its backdrop.
+    private static let captureDelay: Duration = .milliseconds(400)
 
     private var enabled: Bool {
         get { UserDefaults.standard.object(forKey: "enabled") as? Bool ?? true }
@@ -24,14 +50,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setUpStatusItem()
         overlay.onClose = { [weak self] target in
             switch target {
-            case .window(let window): self?.perform(.close, on: window)
-            case .dockApp(let app): self?.perform(.quit, on: app)
+            case .window: self?.request(.close, on: target)
+            case .dockApp: self?.request(.quit, on: target)
             }
         }
         hotkeys.isActive = { [weak self] in self?.isTracking ?? false }
         hotkeys.handler = { [weak self] command in self?.handleHotkey(command) ?? false }
         monitor.onChange = { [weak self] active in self?.missionControlChanged(active) }
         ensurePermissionThenStart()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        commit(pending.commitAll())
     }
 
     private var isTracking: Bool { trackTimer != nil }
@@ -54,7 +84,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func start() {
         hotkeysStarted = hotkeys.start()
         if !hotkeysStarted { NSLog("MCClose: failed to create key event tap") }
+        // Screen Recording is what lets a closed window look gone while the rest of Mission Control holds still.
+        // Without it, actions take effect immediately.
+        if #available(macOS 14, *), !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
         monitor.start()
+    }
+
+    /// Whether actions can be held back, which needs a captured backdrop to hide their thumbnails.
+    private var canDefer: Bool {
+        guard #available(macOS 14, *), CGPreflightScreenCaptureAccess() else { return false }
+        return !backgrounds.isEmpty || captureTask != nil
     }
 
     // MARK: Tracking
@@ -64,22 +103,62 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             closing.removeAll()
             quitting.removeAll()
             dockScannedAt = .distantPast
+            captureBackground()
             trackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.track() }
             RunLoop.main.add(trackTimer!, forMode: .common)
             track()
         } else {
             trackTimer?.invalidate()
             trackTimer = nil
+            // Mission Control is gone, so nothing can rearrange any more.
+            commit(pending.commitAll())
+            captureTask?.cancel()
+            captureTask = nil
+            backgrounds = []
+            committedCovers.removeAll()
+            covers.removeAll()
             overlay.hide()
+            allWindows = []
             windows = []
+            allDockApps = []
             dockApps = []
         }
     }
 
+    private func captureBackground() {
+        guard #available(macOS 14, *), CGPreflightScreenCaptureAccess() else { return }
+        captureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.captureDelay)
+            guard !Task.isCancelled else { return }
+            do {
+                let captured = try await BackgroundCapture.capture()
+                guard !Task.isCancelled, let self else { return }
+                self.backgrounds = captured
+                debugLog("captured backdrop for \(captured.count) display(s)")
+            } catch {
+                NSLog("MCClose: couldn't capture the Mission Control backdrop, so actions will take effect immediately: %@",
+                      String(describing: error))
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.captureTask = nil
+            // Anything queued while capturing can't be hidden after all.
+            if self.backgrounds.isEmpty { self.commit(self.pending.commitAll()) }
+            self.track()
+        }
+    }
+
+    private var coveredWindowIDs: Set<CGWindowID> {
+        pending.hiddenWindowIDs.union(committedCovers.keys.compactMap { if case .window(let id) = $0 { id } else { nil } })
+    }
+
     private func track() {
-        windows = WindowScanner.visibleWindows().filter { !closing.contains($0.id) }
+        allWindows = WindowScanner.visibleWindows()
         let mouse = NSEvent.mouseLocation
         scanDockIfNeeded(mouse: mouse)
+        commitIfDue(mouse: mouse)
+        let covered = coveredWindowIDs
+        windows = allWindows.filter { !closing.contains($0.id) && !covered.contains($0.id) }
+        updateCovers()
         if let current = refreshed(overlay.target), overlay.contains(mouse) {
             overlay.show(for: current)
         } else if let hovered = target(at: mouse) {
@@ -89,6 +168,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func commitIfDue(mouse: NSPoint) {
+        guard !pending.isEmpty else { return }
+        let area = CoverGeometry.activeArea(thumbnails: allWindows.map(\.frame), dockItems: allDockApps.map(\.frame))
+        commit(pending.commitIfDue(now: Date(), commandHeld: Self.commandHeld, pointerInActiveArea: area.contains(mouse)))
+    }
+
+    private static var commandHeld: Bool {
+        CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand)
+    }
+
     /// Dock icons rarely move, so rescan them slowly unless the pointer is near the Dock, where icons may slide or
     /// magnify and the overlay needs every frame to tell when they've settled.
     private func scanDockIfNeeded(mouse: NSPoint) {
@@ -96,7 +185,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let interval: TimeInterval = nearDock ? 0 : 0.5
         guard Date().timeIntervalSince(dockScannedAt) >= interval else { return }
         dockScannedAt = Date()
-        dockApps = DockScanner.runningApps().filter { !quitting.contains($0.pid) }
+        allDockApps = DockScanner.runningApps()
+        dockApps = allDockApps.filter { !quitting.contains($0.pid) }
+    }
+
+    private func updateCovers() {
+        let now = Date()
+        committedCovers = committedCovers.filter { key, committedAt in
+            guard now.timeIntervalSince(committedAt) < Self.committedCoverTimeout else { return false }
+            switch key {
+            case .window(let id): return allWindows.contains { $0.id == id }
+            case .dockApp(let pid): return allDockApps.contains { $0.pid == pid }
+            }
+        }
+        let coveredWindows = coveredWindowIDs
+        let coveredApps = pending.hiddenAppPIDs.union(committedCovers.keys.compactMap { if case .dockApp(let pid) = $0 { pid } else { nil } })
+        let neighbors = allWindows.filter { !coveredWindows.contains($0.id) }.map(\.frame)
+        var items: [Covers.Item] = []
+        for window in allWindows where coveredWindows.contains(window.id) {
+            let rect = CoverGeometry.coverRect(for: window.frame).integral
+            guard let background = background(containing: window.frame), let visible = background.visiblePart(of: rect) else { continue }
+            items.append(Covers.Item(key: .window(window.id), frame: visible,
+                                     holes: CoverGeometry.holes(in: visible, neighbors: neighbors),
+                                     image: { background.crop(visible) }))
+        }
+        for app in allDockApps where coveredApps.contains(app.pid) {
+            let gap = CapturedBackground.dockGapRect(for: app.frame)
+            guard let background = background(containing: app.frame), background.visiblePart(of: gap) == gap else { continue }
+            items.append(Covers.Item(key: .dockApp(app.pid), frame: gap, holes: [], image: { background.dockGap(gap) }))
+        }
+        covers.update(items)
+    }
+
+    private func background(containing rect: NSRect) -> CapturedBackground? {
+        backgrounds.first { $0.frame.contains(NSPoint(x: rect.midX, y: rect.midY)) }
     }
 
     /// The target with its current frame, or nil if it's gone.
@@ -121,12 +243,58 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Actions
 
     private func handleHotkey(_ command: Hotkeys.Command) -> Bool {
-        switch hoveredTarget {
-        case .window(let window): DispatchQueue.main.async { self.perform(command, on: window) }
-        case .dockApp(let app): DispatchQueue.main.async { self.perform(command, on: app) }
-        case nil: return false
-        }
+        guard let target = hoveredTarget else { return false }
+        DispatchQueue.main.async { self.request(command, on: target) }
         return true
+    }
+
+    /// Hides what the action will remove and holds the action back so nothing rearranges yet, or performs it now when
+    /// it can't be hidden. Opening a window always happens now; it leaves Mission Control, which commits the rest.
+    private func request(_ command: Hotkeys.Command, on target: HoverTarget) {
+        overlay.hide()
+        guard command != .open, canDefer else {
+            perform(command, on: target)
+            track()
+            return
+        }
+        let pid = target.pid
+        let windowIDs: [CGWindowID]
+        switch (command, target) {
+        case (.close, .window(let w)), (.minimize, .window(let w)):
+            windowIDs = [w.id]
+        case (.hideOthers, _):
+            windowIDs = windows.filter { $0.pid != pid && NSRunningApplication(processIdentifier: $0.pid)?.activationPolicy == .regular }.map(\.id)
+        default:
+            windowIDs = windows.filter { $0.pid == pid }.map(\.id)
+        }
+        var apps: Set<pid_t> = []
+        if command == .quit {
+            quitting.insert(pid)
+            if case .dockApp(let app) = target, DockScanner.removesIconOnQuit(app) { apps.insert(pid) }
+        }
+        let action = PendingCommand(command: command, target: target, hiddenWindows: Set(windowIDs), hidesDockIcon: !apps.isEmpty)
+        debugLog("defer \(command) on \(target), hiding \(windowIDs.count) window(s)")
+        pending.enqueue(action, hidingWindows: action.hiddenWindows, hidingApps: apps, at: Date(), commandHeld: Self.commandHeld)
+        track()
+    }
+
+    /// Performs held-back actions. Their covers stay up until what they hid is actually gone.
+    private func commit(_ actions: [PendingCommand]) {
+        guard !actions.isEmpty else { return }
+        debugLog("commit \(actions.count) action(s)")
+        let now = Date()
+        for action in actions {
+            action.hiddenWindows.forEach { committedCovers[.window($0)] = now }
+            if action.hidesDockIcon { committedCovers[.dockApp(action.target.pid)] = now }
+            perform(action.command, on: action.target)
+        }
+    }
+
+    private func perform(_ command: Hotkeys.Command, on target: HoverTarget) {
+        switch target {
+        case .window(let window): perform(command, on: window)
+        case .dockApp(let app): perform(command, on: app)
+        }
     }
 
     private func perform(_ command: Hotkeys.Command, on window: ScreenWindow) {
@@ -135,7 +303,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             closing.insert(window.id)
             Actions.closeWindow(window)
         case .closeAll:
-            windows.filter { $0.pid == window.pid }.forEach { closing.insert($0.id) }
+            allWindows.filter { $0.pid == window.pid }.forEach { closing.insert($0.id) }
             Actions.closeAllWindows(of: window.pid)
         case .minimize:
             Actions.minimize(window)
@@ -146,21 +314,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .hideOthers:
             Actions.hideOthers(except: window.pid)
         case .quit:
-            windows.filter { $0.pid == window.pid }.forEach { closing.insert($0.id) }
+            allWindows.filter { $0.pid == window.pid }.forEach { closing.insert($0.id) }
             Actions.quit(pid: window.pid)
         case .open:
             overlay.hide()
             Actions.open(window)
         }
-        overlay.hide()
-        track()
     }
 
     /// Window-level commands act on all of the app's windows when a Dock icon is hovered.
     private func perform(_ command: Hotkeys.Command, on app: DockApp) {
         switch command {
         case .close, .closeAll:
-            windows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
+            allWindows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
             Actions.closeAllWindows(of: app.pid)
         case .minimize, .minimizeAll:
             Actions.minimizeAll(of: app.pid)
@@ -172,14 +338,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             debugLog("quit dock app \(app.name) pid=\(app.pid)")
             quitting.insert(app.pid)
             dockApps.removeAll { $0.pid == app.pid }
-            windows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
+            allWindows.filter { $0.pid == app.pid }.forEach { closing.insert($0.id) }
             Actions.quit(pid: app.pid)
         case .open:
             overlay.hide()
             Actions.activate(app)
         }
-        overlay.hide()
-        track()
     }
 
     // MARK: Menu bar
@@ -215,6 +379,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isEnabled = false
             menu.addItem(item)
         }
+        if #available(macOS 14, *), !CGPreflightScreenCaptureAccess() {
+            let item = NSMenuItem(title: "Allow Screen Recording to Keep Windows in Place…",
+                                  action: #selector(openScreenRecording), keyEquivalent: "")
+            item.target = self
+            item.toolTip = "Lets closed windows vanish without the rest of Mission Control rearranging until you're done."
+            menu.addItem(item)
+        }
 
         menu.addItem(.separator())
         let title = NSMenuItem(title: "In Mission Control, hover a window or Dock icon and press:", action: nil, keyEquivalent: "")
@@ -233,6 +404,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleEnabled() {
         enabled.toggle()
         if !enabled { missionControlChanged(false) }
+    }
+
+    @objc private func openScreenRecording() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
 
     @objc private func openAccessibility() {
