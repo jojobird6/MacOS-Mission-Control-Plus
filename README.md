@@ -13,7 +13,7 @@ Close windows straight from macOS Mission Control. Hover over a window thumbnail
   | ⌥⌘W | Close all windows of the app |
   | ⌘M / ⌥⌘M | Minimize window / all app windows |
   | ⌘H / ⌥⌘H | Hide app / hide other apps |
-  | ⌘Q | Quit app |
+  | ⌘Q | Force quit app (no save prompts; unsaved changes are lost) |
   | ↩ | Open window |
 
   The shortcuts also work when a Dock icon is hovered. There, they act on the whole app: ⌘W and ⌘M close or minimize all of its windows, and ↩ switches to the app.

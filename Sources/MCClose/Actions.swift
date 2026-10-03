@@ -60,8 +60,9 @@ enum Actions {
 
     static func quit(pid: pid_t) {
         let app = NSRunningApplication(processIdentifier: pid)
-        // terminate() fails when LaunchServices has lost track of the app's pid (it reports -1).
-        let ok = (app.map { $0.processIdentifier > 0 && $0.terminate() } ?? false) || pressQuitMenuItem(pid: pid)
+        // Force quit, so apps can't stall on a save-changes prompt. forceTerminate() fails when
+        // LaunchServices has lost track of the app's pid (it reports -1); the menu item is the fallback.
+        let ok = (app.map { $0.processIdentifier > 0 && $0.forceTerminate() } ?? false) || pressQuitMenuItem(pid: pid)
         debugLog("quit pid=\(pid) found=\(app != nil) ok=\(ok)")
     }
 
